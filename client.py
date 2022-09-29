@@ -67,6 +67,7 @@ class CifarClient(fl.client.NumPyClient):
     ) -> Tuple[List[np.ndarray], int, Dict]:
         # Set model parameters, train model, return updated model parameters
         self.set_parameters(parameters)
+
         face_name_mapping_torch.train(self.model, self.trainloader, epochs=10, device=DEVICE)
         return self.get_parameters(), self.num_examples["trainset"], {}
 
