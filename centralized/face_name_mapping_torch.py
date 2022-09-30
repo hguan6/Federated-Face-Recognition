@@ -1,7 +1,7 @@
 
 import torch
 import torch.nn as nn
-from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import TensorDataset, DataLoader, Dataset
 from torch import Tensor
 
 import pickle
@@ -9,6 +9,7 @@ import os
 from tqdm import tqdm
 import numpy as np
 
+NUM_PARTITIONS = 2
 class Net(nn.Module):
     """Simple Linear layer"""
     def __init__(self, in_dim: int = 128, out_dim: int = 992) -> None:
@@ -20,7 +21,7 @@ class Net(nn.Module):
         return self.model(x)
 
 
-def load_data() -> tuple[torch.utils.data.DataLoader, dict]:
+def load_data() -> tuple[DataLoader, DataLoader, dict]:
     """Load face embeddings"""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     pkl_path = os.path.join(script_dir, "embeddings", "embeddings.pkl")
@@ -30,18 +31,36 @@ def load_data() -> tuple[torch.utils.data.DataLoader, dict]:
     # imgs_ndarray = np.random.rand(992, 128)
     img_tensor = torch.tensor(imgs_ndarray, dtype=torch.float32)
     labels = torch.arange(0, img_tensor.size(0))
-    trainloader = DataLoader(TensorDataset(img_tensor, labels), batch_size=32, shuffle=True)
+    trainset = TensorDataset(img_tensor, labels)
     num_examples = {"trainset": len(labels), "testset": len(labels)}
-    return (trainloader, num_examples)
+    return (trainset, trainset, num_examples)
+
+def load_partition(idx: int) -> tuple[Dataset, Dataset, dict]:
+    """Load 1dx/{NUM_PARTITIONS}th of the training and test data to simulate a partition."""
+    assert idx in range(NUM_PARTITIONS)
+    trainset, testset, num_examples = load_data()
+    n_train = num_examples["trainset"] // NUM_PARTITIONS
+    n_test = num_examples["testset"] // NUM_PARTITIONS
+
+    train_parition = torch.utils.data.Subset(
+        trainset, range(idx * n_train, (idx + 1) * n_train)
+    )
+    test_parition = torch.utils.data.Subset(
+        testset, range(idx * n_test, (idx + 1) * n_test)
+    )
+    return (train_parition, test_parition, num_examples)
 
 
 def train(
     net: Net,
-    trainloader: DataLoader,
+    trainset: Dataset,
     epochs: int,
-    device: torch.device,  # pylint: disable=no-member
+    device: torch.device,
 ) -> None:
     """Train the network."""
+    # Create dataloaders
+    trainloader = DataLoader(trainset, batch_size=32, shuffle=True)
+
     # Define loss and optimizer
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(net.parameters(), lr=0.001)
@@ -70,8 +89,9 @@ def train(
                 print("[%d, %5d] loss: %.3f" % (epoch + 1, i + 1, running_loss / 2000))
                 running_loss = 0.0
 
-def test(net: Net, testloader: DataLoader, DEVICE: torch.device) -> tuple[float, float]:
+def test(net: Net, test_data: DataLoader, DEVICE: torch.device) -> tuple[float, float]:
     """Validate the model on the test set."""
+    testloader = DataLoader(test_data, batch_size=64, shuffle=False)
     criterion = torch.nn.CrossEntropyLoss()
     correct, total, loss = 0, 0, 0.0
     with torch.no_grad():
@@ -87,12 +107,12 @@ if __name__ == "__main__":
     DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print("Centralized PyTorch training")
     print("Load data")
-    trainloader, num_examples = load_data()
+    trainset, testset, num_examples = load_data()
     net = Net().to(DEVICE)
     net.eval()
     print("Start training")
-    train(net, trainloader, 100, DEVICE)
+    train(net, trainset, 100, DEVICE)
     print("Evaluate model")
-    loss, accuracy = test(net, trainloader, DEVICE)
+    loss, accuracy = test(net, testset, DEVICE)
     print("Loss: ", loss)
     print("Accuracy: ", accuracy)

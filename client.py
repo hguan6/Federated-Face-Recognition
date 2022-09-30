@@ -1,12 +1,14 @@
 """Flower client example using PyTorch for facial recognition."""
+import argparse
+
 import flwr as fl
 import numpy as np
 import torch
+from torch.utils.data import TensorDataset, DataLoader, Dataset
 
 from centralized import face_name_mapping_torch
 
 USE_FEDBN: bool = True
-DEVICE: str = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 # Flower Client
 class Client(fl.client.NumPyClient):
@@ -14,14 +16,16 @@ class Client(fl.client.NumPyClient):
     def __init__(
         self,
         model: face_name_mapping_torch.Net,
-        trainloader: torch.utils.data.DataLoader,
-        testloader: torch.utils.data.DataLoader,
-        num_examples: dict
+        trainset: Dataset,
+        testset: Dataset,
+        num_examples: dict,
+        device: torch.device,
     ) -> None:
         self.model = model
-        self.trainloader = trainloader
-        self.testloader = testloader
+        self.trainset = trainset
+        self.testset = testset
         self.num_examples = num_examples
+        self.device = device
 
     def get_parameters(self, config: dict[str, str] = None) -> list[np.ndarray]:
         self.model.train()
@@ -55,7 +59,7 @@ class Client(fl.client.NumPyClient):
         # Set model parameters, train model, return updated model parameters
         self.set_parameters(parameters)
 
-        face_name_mapping_torch.train(self.model, self.trainloader, epochs=30, device=DEVICE)
+        face_name_mapping_torch.train(self.model, self.trainset, epochs=30, device=self.device)
         return self.get_parameters(), self.num_examples["trainset"], {}
 
     def evaluate(
@@ -63,21 +67,48 @@ class Client(fl.client.NumPyClient):
     ) -> tuple[float, int, dict]:
         # Set model parameters, evaluate model on local test dataset, return result
         self.set_parameters(parameters)
-        loss, accuracy = face_name_mapping_torch.test(self.model, self.testloader, DEVICE)
+        loss, accuracy = face_name_mapping_torch.test(self.model, self.testset, self.device)
         return float(loss), self.num_examples["testset"], {"accuracy": float(accuracy)}
 
 
 if __name__ == "__main__":
     """Load data, start Client."""
+    # Load arguments
+    parser = argparse.ArgumentParser(description="Flower")
+    parser.add_argument(
+        "--partition",
+        type=int,
+        default=0,
+        choices=range(0, 2),
+        required=False,
+        help="Specifies the artificial data partition of CIFAR10 to be used. \
+        Picks partition 0 by default",
+    )
+
+    parser.add_argument(
+        "--use_cuda",
+        type=bool,
+        default=False,
+        required=False,
+        help="Set to true to use GPU. Default: False",
+    )
+
+    args = parser.parse_args()
+
+    device = torch.device(
+        "cuda:0" if torch.cuda.is_available() and args.use_cuda else "cpu"
+    )
+
     # Load data
-    trainloader, num_examples = face_name_mapping_torch.load_data()
+    trainset, testset, num_examples = face_name_mapping_torch.load_partition(args.partition)
+
 
     # Load model
-    model = face_name_mapping_torch.Net().to(DEVICE).train()
+    model = face_name_mapping_torch.Net().to(device).train()
 
-    # Perform a single forward pass to properly initialize BatchNorm
-    _ = model(next(iter(trainloader))[0].to(DEVICE))
+    # # Perform a single forward pass to properly initialize BatchNorm
+    # _ = model(next(iter(trainloader))[0].to(device))
 
     # Start client
-    client = Client(model, trainloader, trainloader, num_examples)
+    client = Client(model, trainset, testset, num_examples, device)
     fl.client.start_numpy_client(server_address="127.0.0.1:8080", client=client)
