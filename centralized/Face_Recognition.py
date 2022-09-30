@@ -112,8 +112,11 @@ len(res)
 # Save "res" 
         
 import pickle
-
-with open("test", "wb") as fp:   
+import os
+embedding_dir = "embeddings"
+os.makedirs(embedding_dir, exist_ok=True)
+embedding_path = os.path.join(embedding_dir, "embeddings.pkl")
+with open(embedding_path, "wb") as fp:   
     pickle.dump(res, fp)
     
 
