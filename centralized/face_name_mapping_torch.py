@@ -1,15 +1,13 @@
+import pickle
+import os
 
 import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader, Dataset
 from torch import Tensor
-
-import pickle
-import os
-from tqdm import tqdm
 import numpy as np
+from torch.utils.tensorboard import SummaryWriter
 
-NUM_PARTITIONS = 2
 class Net(nn.Module):
     """Simple Linear layer"""
     def __init__(self, in_dim: int = 128, out_dim: int = 992) -> None:
@@ -35,29 +33,20 @@ def load_data() -> tuple[DataLoader, DataLoader, dict]:
     num_examples = {"trainset": len(labels), "testset": len(labels)}
     return (trainset, trainset, num_examples)
 
-def load_partition(idx: int) -> tuple[Dataset, Dataset, dict]:
-    """Load 1dx/{NUM_PARTITIONS}th of the training and test data to simulate a partition."""
-    assert idx in range(NUM_PARTITIONS)
-    trainset, testset, num_examples = load_data()
-    n_train = num_examples["trainset"] // NUM_PARTITIONS
-    n_test = num_examples["testset"] // NUM_PARTITIONS
-
-    train_parition = torch.utils.data.Subset(
-        trainset, range(idx * n_train, (idx + 1) * n_train)
-    )
-    test_parition = torch.utils.data.Subset(
-        testset, range(idx * n_test, (idx + 1) * n_test)
-    )
-    return (train_parition, test_parition, num_examples)
-
 
 def train(
     net: Net,
     trainset: Dataset,
     epochs: int,
     device: torch.device,
+    id: str = "",
+    log_tensorboard: bool = False
 ) -> None:
     """Train the network."""
+    # Initial tensorboard SummaryWriter
+    if log_tensorboard:
+        writer = SummaryWriter()
+
     # Create dataloaders
     trainloader = DataLoader(trainset, batch_size=32, shuffle=True)
 
@@ -71,7 +60,7 @@ def train(
     net.to(device)
     net.train()
     for epoch in range(epochs):  # loop over the dataset multiple times
-        running_loss = 0.0
+        net.train()
         for i, (img_batch, labels) in enumerate(trainloader):
             img_batch, labels = img_batch.to(device), labels.to(device)
             # zero the parameter gradients
@@ -83,35 +72,71 @@ def train(
             loss.backward()
             optimizer.step()
 
-            # print statistics
-            running_loss += loss.item()
-            if i % 100 == 99:  # print every 100 mini-batches
-                print("[%d, %5d] loss: %.3f" % (epoch + 1, i + 1, running_loss / 2000))
-                running_loss = 0.0
+        # Log loss and accuracy to tensorboard
+        if log_tensorboard:
+            loss, accuracy = test(net, trainset, device)
+            loss_label = "Loss/whole" if id == "" else f"Loss/partition{id}"
+            acc_label = "Accuracy/whole" if id == "" else f"Accuracy/partition{id}"
+            writer.add_scalar(loss_label, loss, epoch)
+            writer.add_scalar(acc_label, accuracy, epoch)
+   
 
-def test(net: Net, test_data: DataLoader, DEVICE: torch.device) -> tuple[float, float]:
+def test(
+    net: Net, 
+    testset: Dataset, 
+    device: torch.device
+) -> tuple[float, float]:
     """Validate the model on the test set."""
-    testloader = DataLoader(test_data, batch_size=64, shuffle=False)
+    net.eval()
+    testloader = DataLoader(testset, batch_size=64, shuffle=False)
     criterion = torch.nn.CrossEntropyLoss()
-    correct, total, loss = 0, 0, 0.0
+    # correct, total, loss = 0, 0, 0.0
+    correct, loss = 0, 0.0
     with torch.no_grad():
-        for images, labels in tqdm(testloader):
-            outputs = net(images.to(DEVICE))
-            labels = labels.to(DEVICE)
+        for images, labels in testloader:
+            outputs = net(images.to(device))
+            labels = labels.to(device)
             loss += criterion(outputs, labels).item()
-            total += labels.size(0)
+            # total += labels.size(0)
             correct += (torch.max(outputs.data, 1)[1] == labels).sum().item()
-    return (loss / len(testloader.dataset), correct / total)
+    return (loss / len(testset), correct / len(testset))
+    # return (loss / len(testloader.dataset), correct / total)
 
 if __name__ == "__main__":
-    DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    import argparse
+    
+    # Parse arguments
+    parser = argparse.ArgumentParser(description="Flower")
+    parser.add_argument(
+        "--log_tensorboard",
+        action="store_true",
+        help="Whether to log loss and metrics to Tensorboard",
+    )
+    parser.add_argument(
+        "--train_epochs",
+        type=int,
+        default=30,
+        required=False,
+        help="Number of training epochs for each round",
+    )
+    parser.add_argument(
+        "--use_cuda",
+        type=bool,
+        default=False,
+        required=False,
+        help="Set to true to use GPU. Default: False",
+    )
+
+    args = parser.parse_args()
+
+    DEVICE = torch.device("cuda:0" if torch.cuda.is_available() and args.use_cuda else "cpu")
     print("Centralized PyTorch training")
     print("Load data")
     trainset, testset, num_examples = load_data()
     net = Net().to(DEVICE)
     net.eval()
     print("Start training")
-    train(net, trainset, 100, DEVICE)
+    train(net, trainset, args.train_epochs, DEVICE, log_tensorboard=args.log_tensorboard)
     print("Evaluate model")
     loss, accuracy = test(net, testset, DEVICE)
     print("Loss: ", loss)
